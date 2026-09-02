@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Keyboard Heatmap">
+  <rect width="512" height="512" rx="112" fill="#101217"/>
+  <rect x="72" y="106" width="368" height="300" rx="44" fill="#171b22" stroke="#393e49" stroke-width="12"/>
+  <g fill="#fff2f6">
+    <rect x="108" y="146" width="56" height="46" rx="12"/>
+    <rect x="178" y="146" width="56" height="46" rx="12"/>
+    <rect x="248" y="146" width="56" height="46" rx="12"/>
+    <rect x="318" y="146" width="56" height="46" rx="12"/>
+    <rect x="108" y="208" width="56" height="46" rx="12"/>
+    <rect x="178" y="208" width="56" height="46" rx="12"/>
+    <rect x="248" y="208" width="56" height="46" rx="12"/>
+    <rect x="318" y="208" width="56" height="46" rx="12"/>
+    <rect x="108" y="270" width="56" height="46" rx="12"/>
+    <rect x="178" y="270" width="56" height="46" rx="12"/>
+    <rect x="248" y="270" width="56" height="46" rx="12"/>
+    <rect x="318" y="270" width="56" height="46" rx="12"/>
+  </g>
+  <g fill="#ff6f9d">
+    <rect x="178" y="208" width="56" height="46" rx="12"/>
+    <rect x="248" y="270" width="56" height="46" rx="12"/>
+    <rect x="108" y="332" width="266" height="34" rx="12"/>
+  </g>
+</svg>
