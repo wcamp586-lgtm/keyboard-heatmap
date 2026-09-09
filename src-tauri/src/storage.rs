@@ -4,17 +4,20 @@
 //! bucket, a fixed numeric identity, and an accumulated count. There are no
 //! event, sequence, character, device, process, or window columns or tables.
 
-use std::{collections::BTreeMap, path::Path, sync::Mutex};
+use std::{collections::BTreeMap, path::Path, sync::Mutex, time::Duration as StdDuration};
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{Datelike, Duration, Local, LocalResult, TimeZone, Timelike};
+use chrono::{Local, LocalResult, TimeZone, Timelike};
 use rusqlite::{params, Connection};
 
 use crate::{
+    date_range::DateSelection,
     keymap::KeyId,
     models::{DashboardRange, DashboardSnapshot, HourlyCount, KeyCount, ShortcutCount},
     shortcuts::ShortcutId,
 };
+
+mod history;
 
 pub type HourlyKeyBatch = BTreeMap<(i64, KeyId), u64>;
 pub type HourlyShortcutBatch = BTreeMap<(i64, ShortcutId), u64>;
@@ -81,6 +84,7 @@ impl AggregateStore {
     }
 
     fn configure_and_migrate(connection: &mut Connection) -> Result<()> {
+        connection.busy_timeout(StdDuration::from_millis(1_500))?;
         // WAL contains only pages for the fixed aggregate tables below.
         connection.execute_batch(
             "
@@ -195,8 +199,25 @@ impl AggregateStore {
     }
 
     pub fn dashboard(&self, range: DashboardRange) -> Result<DashboardSnapshot> {
-        let (start, end) = range.bounds_now();
-        self.dashboard_between(range, start, end)
+        self.dashboard_selection(&range.into())
+    }
+
+    pub fn dashboard_selection(&self, selection: &DateSelection) -> Result<DashboardSnapshot> {
+        let first = if selection.range == DashboardRange::All {
+            let connection = self
+                .connection
+                .lock()
+                .map_err(|_| anyhow!("Database lock unavailable"))?;
+            history::first_bucket(&connection)?
+        } else {
+            None
+        };
+        let resolved = selection.resolve(&Local::now(), first)?;
+        let mut snapshot =
+            self.dashboard_between(selection.range, resolved.start_utc, resolved.end_utc)?;
+        snapshot.range_start_date = resolved.start_date.to_string();
+        snapshot.range_end_date = resolved.end_date.to_string();
+        Ok(snapshot)
     }
 
     pub(crate) fn dashboard_between(
@@ -212,10 +233,10 @@ impl AggregateStore {
         let key_rows = {
             let mut statement = connection.prepare(
                 "
-                SELECT hour_start_utc, key_id, press_count
+                SELECT 0, key_id, SUM(press_count)
                 FROM key_hourly_counts
                 WHERE hour_start_utc >= ?1 AND hour_start_utc < ?2
-                ORDER BY hour_start_utc, key_id
+                GROUP BY key_id ORDER BY key_id
                 ",
             )?;
             let rows = statement.query_map(params![start, end], |row| {
@@ -230,10 +251,10 @@ impl AggregateStore {
         let shortcut_rows = {
             let mut statement = connection.prepare(
                 "
-                SELECT hour_start_utc, shortcut_id, press_count
+                SELECT 0, shortcut_id, SUM(press_count)
                 FROM shortcut_hourly_counts
                 WHERE hour_start_utc >= ?1 AND hour_start_utc < ?2
-                ORDER BY hour_start_utc, shortcut_id
+                GROUP BY shortcut_id ORDER BY shortcut_id
                 ",
             )?;
             let rows = statement.query_map(params![start, end], |row| {
@@ -252,15 +273,25 @@ impl AggregateStore {
             .collect::<BTreeMap<_, _>>();
         let mut hourly = [0_u64; 24];
 
-        for (hour_start_utc, stored_key_id, stored_count) in key_rows {
+        for (_hour_start_utc, stored_key_id, stored_count) in key_rows {
             let key = KeyId::from_storage_id(stored_key_id)
                 .ok_or_else(|| anyhow!("Database contains an unknown fixed key ID"))?;
             let count = u64::try_from(stored_count)
                 .map_err(|_| anyhow!("Database contains an invalid aggregate count"))?;
 
             *counts.entry(key).or_default() += count;
-            let local_hour = local_hour_from_utc(hour_start_utc);
-            hourly[local_hour] += count;
+        }
+
+        let mut hourly_statement = connection.prepare(
+            "SELECT hour_start_utc, SUM(press_count) FROM key_hourly_counts
+             WHERE hour_start_utc >= ?1 AND hour_start_utc < ?2 GROUP BY hour_start_utc",
+        )?;
+        let hours = hourly_statement.query_map(params![start, end], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?))
+        })?;
+        for hour in hours {
+            let (stamp, count) = hour?;
+            hourly[local_hour_from_utc(stamp)] += count;
         }
 
         let mut shortcut_counts = ShortcutId::ALL
@@ -302,6 +333,13 @@ impl AggregateStore {
             })
             .collect();
         let total_shortcuts = shortcut_counts.values().sum();
+        let all_shortcut_counts = ShortcutId::ALL
+            .into_iter()
+            .map(|shortcut| ShortcutCount {
+                shortcut_id: shortcut.wire_id().to_owned(),
+                count: shortcut_counts[&shortcut],
+            })
+            .collect();
         let mut ranked_shortcuts = shortcut_counts
             .into_iter()
             .filter(|(_, count)| *count > 0)
@@ -332,6 +370,16 @@ impl AggregateStore {
 
         Ok(DashboardSnapshot {
             range,
+            range_start_date: Local
+                .timestamp_opt(start, 0)
+                .single()
+                .map(|time| time.date_naive().to_string())
+                .unwrap_or_default(),
+            range_end_date: Local
+                .timestamp_opt(end - 1, 0)
+                .single()
+                .map(|time| time.date_naive().to_string())
+                .unwrap_or_default(),
             range_start_utc: start,
             range_end_utc: end,
             total_presses,
@@ -340,39 +388,9 @@ impl AggregateStore {
             key_counts,
             top_keys,
             top_shortcuts,
+            shortcut_counts: all_shortcut_counts,
             hourly_distribution,
         })
-    }
-}
-
-impl DashboardRange {
-    fn bounds_now(self) -> (i64, i64) {
-        let now = Local::now();
-        let today = now.date_naive();
-        let start_day = match self {
-            Self::Today => today,
-            Self::Week => today - Duration::days(i64::from(now.weekday().num_days_from_monday())),
-            Self::Month => today.with_day(1).expect("Every month has day one"),
-            // The application only writes positive Unix timestamps. Keeping the
-            // lower bound at zero avoids making a special unbounded SQL query.
-            Self::All => return (0, utc_hour_start(now.timestamp()) + 3_600),
-        };
-        let start_naive = start_day
-            .and_hms_opt(0, 0, 0)
-            .expect("Midnight is always a valid wall-clock time");
-        let start_local = match Local.from_local_datetime(&start_naive) {
-            LocalResult::Single(value) => value,
-            // A repeated midnight is assigned to the earlier occurrence so a
-            // local dashboard never drops the first hour on a DST transition.
-            LocalResult::Ambiguous(earlier, _) => earlier,
-            // This is extraordinarily rare; it remains a safe, local fallback.
-            LocalResult::None => now,
-        };
-
-        (
-            start_local.timestamp(),
-            utc_hour_start(now.timestamp()) + 3_600,
-        )
     }
 }
 
@@ -392,6 +410,61 @@ fn local_hour_from_utc(timestamp_seconds: i64) -> usize {
 mod tests {
     use super::{utc_hour_start, AggregateStore, HourlyKeyBatch, HourlyShortcutBatch};
     use crate::{keymap::KeyId, models::DashboardRange, shortcuts::ShortcutId};
+
+    #[test]
+    fn complete_catalogs_keep_rows_beyond_top_ten_and_stable_ties() {
+        let store = AggregateStore::open_in_memory().unwrap();
+        let keys = KeyId::ALL
+            .into_iter()
+            .take(20)
+            .map(|key| ((3600, key), 5))
+            .collect();
+        let shortcuts = ShortcutId::ALL
+            .into_iter()
+            .take(25)
+            .map(|key| ((3600, key), 3))
+            .collect();
+        store.increment_batch(&keys, &shortcuts).unwrap();
+        let dashboard = store
+            .dashboard_between(DashboardRange::All, 0, 7200)
+            .unwrap();
+        assert_eq!(dashboard.key_counts.len(), 104);
+        assert_eq!(dashboard.shortcut_counts.len(), 85);
+        assert_eq!(dashboard.top_keys.len(), 10);
+        assert_eq!(dashboard.top_shortcuts.len(), 10);
+        assert_eq!(dashboard.total_presses, 100);
+        assert_eq!(dashboard.total_shortcuts, 75);
+        assert_eq!(
+            dashboard
+                .key_counts
+                .iter()
+                .map(|row| row.count)
+                .sum::<u64>(),
+            100
+        );
+        assert_eq!(
+            dashboard
+                .shortcut_counts
+                .iter()
+                .map(|row| row.count)
+                .sum::<u64>(),
+            75
+        );
+        assert_eq!(
+            dashboard
+                .hourly_distribution
+                .iter()
+                .map(|row| row.count)
+                .sum::<u64>(),
+            100
+        );
+        for (index, row) in dashboard.top_shortcuts.iter().enumerate() {
+            assert_eq!(row.shortcut_id, ShortcutId::ALL[index].wire_id());
+        }
+        for (index, row) in dashboard.top_keys.iter().enumerate() {
+            assert_eq!(row.key_id, KeyId::ALL[index].wire_id());
+        }
+    }
 
     #[test]
     fn aggregates_cross_hour_and_cross_day_without_raw_events() {

@@ -4,12 +4,14 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
     collector::KeyCollector,
+    date_range::DateSelection,
     lifecycle::{LifecycleEvent, LifecycleLogger},
-    models::PrivacyStatus,
+    models::{AppSnapshot, CollectionStatus, PrivacyStatus},
     raw_input::{self, RawInputController},
     shortcut_hook::{self, ShortcutHookController},
     storage::AggregateStore,
@@ -123,6 +125,36 @@ impl AppState {
         )
     }
 
+    pub fn collection_status(&self) -> CollectionStatus {
+        let enabled = self.collector.is_enabled();
+        let physical_active = self.raw_input.is_active();
+        let shortcut_active = self.shortcut_hook.is_active();
+        CollectionStatus {
+            enabled,
+            overall: if !enabled {
+                "paused"
+            } else if physical_active && shortcut_active {
+                "collecting"
+            } else if physical_active || shortcut_active {
+                "degraded"
+            } else {
+                "unavailable"
+            },
+            physical_listener: listener_status(enabled, physical_active),
+            shortcut_listener: listener_status(enabled, shortcut_active),
+        }
+    }
+
+    pub fn app_snapshot(&self, selection: &DateSelection) -> Result<AppSnapshot> {
+        let dashboard = self.collector.dashboard_selection(selection)?;
+        Ok(AppSnapshot {
+            generated_at: Utc::now().timestamp(),
+            dashboard,
+            collection: self.collection_status(),
+            storage: self.collector.storage_health(),
+        })
+    }
+
     pub fn note_window_shown(&self) {
         self.lifecycle.record(LifecycleEvent::WindowShown);
     }
@@ -176,5 +208,20 @@ impl AppState {
     pub fn note_unintended_exit_prevented(&self) {
         self.lifecycle
             .record(LifecycleEvent::UnintendedExitPrevented);
+    }
+
+    pub fn note_second_instance_redirected(&self) {
+        self.lifecycle
+            .record(LifecycleEvent::SecondInstanceRedirected);
+    }
+}
+
+fn listener_status(enabled: bool, active: bool) -> &'static str {
+    if !enabled {
+        "paused"
+    } else if active {
+        "active"
+    } else {
+        "unavailable"
     }
 }

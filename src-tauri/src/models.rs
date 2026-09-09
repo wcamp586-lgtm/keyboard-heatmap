@@ -1,19 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 /// Time window accepted by the `get_dashboard` Tauri command.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DashboardRange {
+    #[default]
     Today,
+    Yesterday,
     Week,
     Month,
+    Last30,
     All,
-}
-
-impl Default for DashboardRange {
-    fn default() -> Self {
-        Self::Today
-    }
+    Custom,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -46,6 +44,8 @@ pub struct HourlyCount {
 #[serde(rename_all = "camelCase")]
 pub struct DashboardSnapshot {
     pub range: DashboardRange,
+    pub range_start_date: String,
+    pub range_end_date: String,
     pub range_start_utc: i64,
     pub range_end_utc: i64,
     pub total_presses: u64,
@@ -60,8 +60,93 @@ pub struct DashboardSnapshot {
     pub top_keys: Vec<KeyCount>,
     /// At most ten non-zero fixed shortcut aggregates, ranked by use count.
     pub top_shortcuts: Vec<ShortcutCount>,
+    /// Complete fixed catalog, including zero counts, for detailed rankings.
+    pub shortcut_counts: Vec<ShortcutCount>,
     /// Always contains 24 local-hour bins.
     pub hourly_distribution: Vec<HourlyCount>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum HistoryTarget {
+    Key { id: String },
+    Shortcut { id: String },
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyRecord {
+    pub date: String,
+    pub total_presses: u64,
+    pub total_shortcuts: u64,
+    pub unique_keys: u32,
+    pub top_key: Option<KeyCount>,
+    pub peak_hour: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub generated_at: i64,
+    pub range_start_date: String,
+    pub range_end_date: String,
+    pub page: u32,
+    pub total_pages: u32,
+    pub days: Vec<DailyRecord>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HourRecord {
+    pub hour_start_utc: i64,
+    pub label: String,
+    pub utc_offset: String,
+    pub total_presses: u64,
+    pub total_shortcuts: u64,
+    pub top_key: Option<KeyCount>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayDetail {
+    pub generated_at: i64,
+    pub date: String,
+    pub hours: Vec<HourRecord>,
+}
+
+/// One authoritative view of collection, persistence, and dashboard data.
+/// The frontend renders these facts directly instead of reconstructing health
+/// from several IPC responses captured at different times.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSnapshot {
+    pub generated_at: i64,
+    pub dashboard: DashboardSnapshot,
+    pub collection: CollectionStatus,
+    pub storage: StorageHealthSnapshot,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionStatus {
+    pub enabled: bool,
+    /// `collecting`, `degraded`, `paused`, or `unavailable`.
+    pub overall: &'static str,
+    /// `active`, `paused`, or `unavailable`.
+    pub physical_listener: &'static str,
+    /// `active`, `paused`, or `unavailable`.
+    pub shortcut_listener: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageHealthSnapshot {
+    /// `healthy`, `degraded`, or `unavailable`.
+    pub status: &'static str,
+    pub last_successful_flush_at: Option<i64>,
+    pub last_error_code: Option<&'static str>,
+    pub consecutive_failures: u32,
+    pub storage_mode: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]

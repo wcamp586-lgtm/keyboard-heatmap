@@ -29,6 +29,8 @@ body {
 }
 
 button,
+input,
+select,
 a {
   font: inherit;
 }
@@ -38,7 +40,8 @@ button {
 }
 
 button:disabled {
-  cursor: wait;
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 a {
@@ -46,6 +49,9 @@ a {
 }
 
 button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+.table-scroll:focus-visible,
 a:focus-visible {
   outline: 2px solid #ff87ae;
   outline-offset: 3px;
@@ -72,6 +78,9 @@ a:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .loading-panel__pulse {
+    animation: none;
+  }
   *,
   *::before,
   *::after {

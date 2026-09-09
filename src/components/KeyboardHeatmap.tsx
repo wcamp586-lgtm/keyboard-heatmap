@@ -10,25 +10,26 @@ import {
   NUMPAD_KEYS,
 } from '../lib/keyboard-layout'
 import type { KeyboardKey } from '../lib/keyboard-layout'
+import { formatNumber } from '../lib/format'
+import { nextSelectedKeyId } from '../lib/selection'
 
 type KeyboardHeatmapProps = {
   counts: readonly KeyCount[]
   selectedKeyId: number | null
-  onSelect: (keyId: number) => void
+  onSelect: (keyId: number | null) => void
 }
-
-const formatCount = (count: number) => new Intl.NumberFormat('zh-CN').format(count)
 
 type HeatKeyProps = {
   definition: KeyboardKey
   count: number
   maxCount: number
-  selected: boolean
-  onSelect: (keyId: number) => void
+  selectedKeyId: number | null
+  onSelect: (keyId: number | null) => void
 }
 
-function HeatKey({ definition, count, maxCount, selected, onSelect }: HeatKeyProps) {
+function HeatKey({ definition, count, maxCount, selectedKeyId, onSelect }: HeatKeyProps) {
   const level = heatLevel(count, maxCount)
+  const selected = selectedKeyId === definition.id
   const style: CSSProperties = definition.column
     ? { gridColumn: definition.column, gridRow: definition.row }
     : { flexGrow: definition.width ?? 1 }
@@ -39,18 +40,18 @@ function HeatKey({ definition, count, maxCount, selected, onSelect }: HeatKeyPro
       type="button"
       className={`heat-key heat-key--${level}${selected ? ' is-selected' : ''}`}
       style={style}
-      aria-label={`${definition.label}，${formatCount(count)} 次按下`}
+      aria-label={`${definition.label}，${formatNumber(count)} 次按下`}
       aria-pressed={selected}
-      onClick={() => onSelect(definition.id)}
+      onClick={() => onSelect(nextSelectedKeyId(selectedKeyId, definition.id))}
     >
       <span className={`heat-key__label${compactLabel ? ' heat-key__label--compact' : ''}`}>
         {definition.label}
       </span>
       <span className="heat-key__count" aria-hidden="true">
-        {count > 0 ? formatCount(count) : '—'}
+        {count > 0 ? formatNumber(count) : '—'}
       </span>
       <span className="heat-key__tooltip" role="tooltip">
-        {formatCount(count)} 次按下
+        {formatNumber(count)} 次按下
       </span>
     </button>
   )
@@ -68,7 +69,7 @@ export function KeyboardHeatmap({ counts, selectedKeyId, onSelect }: KeyboardHea
       definition={definition}
       count={countById.get(definition.id) ?? 0}
       maxCount={maxCount}
-      selected={selectedKeyId === definition.id}
+      selectedKeyId={selectedKeyId}
       onSelect={onSelect}
     />
   )

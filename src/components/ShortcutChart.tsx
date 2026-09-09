@@ -1,13 +1,12 @@
 import { useMemo } from 'react'
 import type { ShortcutCount } from '../lib/contracts'
+import { formatNumber } from '../lib/format'
 import { getShortcutDefinition } from '../lib/shortcuts'
 
 type ShortcutChartProps = {
   entries: readonly ShortcutCount[]
   totalShortcuts: number
 }
-
-const numberFormatter = new Intl.NumberFormat('zh-CN')
 
 export function ShortcutChart({ entries, totalShortcuts }: ShortcutChartProps) {
   const rankedEntries = useMemo(
@@ -23,7 +22,7 @@ export function ShortcutChart({ entries, totalShortcuts }: ShortcutChartProps) {
     () => Math.max(1, ...rankedEntries.map(({ pressCount }) => pressCount)),
     [rankedEntries],
   )
-  const totalLabel = numberFormatter.format(totalShortcuts)
+  const totalLabel = formatNumber(totalShortcuts)
 
   return (
     <article className="chart-card shortcut-card" id="shortcuts" aria-labelledby="shortcut-ranking-title">
@@ -57,7 +56,7 @@ export function ShortcutChart({ entries, totalShortcuts }: ShortcutChartProps) {
                 <span className="shortcut-list__track" aria-hidden="true">
                   <span className="shortcut-list__bar" style={{ width: `${percentage}%` }} />
                 </span>
-                <span className="shortcut-list__count">{numberFormatter.format(pressCount)} 次</span>
+                <span className="shortcut-list__count">{formatNumber(pressCount)} 次</span>
               </li>
             )
           })}

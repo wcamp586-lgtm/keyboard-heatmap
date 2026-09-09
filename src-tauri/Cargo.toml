@@ -1,12 +1,12 @@
 [package]
 name = "keyboard-heatmap"
-version = "0.1.3"
+version = "0.1.6"
 description = "A privacy-focused, local-only keyboard heatmap for Windows"
 authors = ["wcamp586-lgtm <298943886+wcamp586-lgtm@users.noreply.github.com>"]
 license = "MIT"
 repository = "https://github.com/wcamp586-lgtm/keyboard-heatmap"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.77.2"
 
 [lib]
 name = "keyboard_heatmap_lib"
@@ -21,6 +21,7 @@ chrono = { version = "0.4", features = ["clock", "serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -34,4 +35,5 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+chrono-tz = "0.10"
 tempfile = "3"

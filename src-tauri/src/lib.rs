@@ -1,6 +1,7 @@
 mod app_state;
 mod collector;
 mod commands;
+mod date_range;
 mod keymap;
 mod lifecycle;
 mod models;
@@ -17,6 +18,12 @@ use app_state::AppState;
 /// Starts the Windows desktop application.
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(state) = app.try_state::<AppState>() {
+                state.note_second_instance_redirected();
+            }
+            tray::show_main_window(app);
+        }))
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 match event {
@@ -44,10 +51,16 @@ pub fn run() {
             let state = AppState::initialize(app.handle())?;
             app.manage(state);
             tray::setup(app.handle())?;
+            if let Some(window) = app.get_webview_window("main") {
+                tray::set_version_title(&window)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_app_snapshot,
             commands::get_dashboard,
+            commands::get_history,
+            commands::get_day_detail,
             commands::get_live_counts,
             commands::set_collection_enabled,
             commands::get_privacy_status,

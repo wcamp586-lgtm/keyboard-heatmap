@@ -2,7 +2,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime,
+    AppHandle, Manager,
 };
 
 use crate::{app_state::AppState, models::PrivacyStatus};
@@ -12,8 +12,12 @@ const SHOW_ID: &str = "show";
 const TOGGLE_COLLECTION_ID: &str = "toggle_collection";
 const QUIT_ID: &str = "quit";
 
+struct TrayMenuState {
+    toggle: MenuItem<tauri::Wry>,
+}
+
 /// Installs the deliberately small V1 tray menu: show, pause/resume, quit.
-pub fn setup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, SHOW_ID, "显示键盘热力", true, None::<&str>)?;
     let status = app.state::<AppState>().privacy_status();
     let (toggle_text, tooltip) = status_presentation(&status);
@@ -22,6 +26,9 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&show, &toggle, &quit])?;
     let toggle_for_menu = toggle.clone();
     let toggle_for_icon = toggle.clone();
+    app.manage(TrayMenuState {
+        toggle: toggle.clone(),
+    });
 
     TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
@@ -74,7 +81,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if window.show().is_ok() {
             let _ = window.set_focus();
@@ -85,13 +92,20 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+pub(crate) fn set_version_title(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    window.set_title(&format!(
+        "键盘热力 v{}",
+        window.app_handle().package_info().version
+    ))
+}
+
 /// Rebuilds the configured main window if it was unexpectedly destroyed.
 ///
 /// Tauri documents a WebView2 deadlock hazard when a Windows webview is
 /// created synchronously inside an event handler. This function therefore
 /// schedules the exact configured main window from a short-lived worker
 /// thread, while an AppState gate prevents duplicate recoveries.
-pub fn recover_main_window<R: Runtime>(app: &AppHandle<R>) {
+pub fn recover_main_window(app: &AppHandle) {
     if !app.state::<AppState>().begin_main_window_recovery() {
         return;
     }
@@ -120,6 +134,7 @@ pub fn recover_main_window<R: Runtime>(app: &AppHandle<R>) {
                     .and_then(|builder| builder.build())
                 {
                     Ok(window) if window.show().is_ok() => {
+                        let _ = set_version_title(&window);
                         let _ = window.set_focus();
                         app.state::<AppState>().note_window_shown();
                         succeeded = true;
@@ -143,18 +158,28 @@ pub fn recover_main_window<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
-fn update_tray_status<R: Runtime>(app: &AppHandle<R>, toggle: &MenuItem<R>) {
+fn update_tray_status(app: &AppHandle, toggle: &MenuItem<tauri::Wry>) {
     let status = app.state::<AppState>().privacy_status();
     let (toggle_text, _) = status_presentation(&status);
     let _ = toggle.set_text(toggle_text);
     update_tray_tooltip(app);
 }
 
-fn update_tray_tooltip<R: Runtime>(app: &AppHandle<R>) {
+fn update_tray_tooltip(app: &AppHandle) {
     let status = app.state::<AppState>().privacy_status();
     let (_, tooltip) = status_presentation(&status);
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_tooltip(Some(tooltip));
+    }
+}
+
+/// Synchronizes the menu label and tooltip after a state transition from any
+/// entry point, including the dashboard IPC command.
+pub fn sync_status(app: &AppHandle) {
+    if let Some(state) = app.try_state::<TrayMenuState>() {
+        update_tray_status(app, &state.toggle);
+    } else {
+        update_tray_tooltip(app);
     }
 }
 

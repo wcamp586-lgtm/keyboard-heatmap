@@ -1,11 +1,10 @@
 import { useMemo } from 'react'
 import type { HourlyCount } from '../lib/contracts'
+import { formatNumber } from '../lib/format'
 
 type HourlyChartProps = {
   entries: readonly HourlyCount[]
 }
-
-const numberFormatter = new Intl.NumberFormat('zh-CN')
 
 export function HourlyChart({ entries }: HourlyChartProps) {
   const hours = useMemo(() => {
@@ -34,12 +33,12 @@ export function HourlyChart({ entries }: HourlyChartProps) {
 
           return (
             <div className="hourly-chart__column" role="listitem" key={hour}>
-              <span className="sr-only">{label} 时：{numberFormatter.format(pressCount)} 次按下</span>
+              <span className="sr-only">{label} 时：{formatNumber(pressCount)} 次按下</span>
               <span
                 className="hourly-chart__bar"
                 style={{ height: `${height}%` }}
                 aria-hidden="true"
-                title={`${label}:00 · ${numberFormatter.format(pressCount)} 次`}
+                title={`${label}:00 · ${formatNumber(pressCount)} 次`}
               />
               {hour % 3 === 0 ? <span className="hourly-chart__label">{label}</span> : null}
             </div>

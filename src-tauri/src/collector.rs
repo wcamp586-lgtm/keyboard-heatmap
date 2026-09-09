@@ -21,8 +21,12 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 
 use crate::{
+    date_range::DateSelection,
     keymap::KeyId,
-    models::{DashboardRange, DashboardSnapshot, KeyCount, LiveCountsSnapshot, ShortcutCount},
+    models::{
+        DashboardRange, DashboardSnapshot, DayDetail, HistoryPage, HistoryTarget, KeyCount,
+        LiveCountsSnapshot, ShortcutCount, StorageHealthSnapshot,
+    },
     shortcuts::ShortcutId,
     storage::{utc_hour_start, AggregateStore, HourlyKeyBatch, HourlyShortcutBatch},
 };
@@ -43,6 +47,62 @@ enum WriterMessage {
     Shutdown(Sender<()>),
 }
 
+#[derive(Debug)]
+struct StorageHealthState {
+    status: &'static str,
+    last_successful_flush_at: Option<i64>,
+    last_error_code: Option<&'static str>,
+    consecutive_failures: u32,
+}
+
+impl Default for StorageHealthState {
+    fn default() -> Self {
+        Self {
+            status: "healthy",
+            last_successful_flush_at: None,
+            last_error_code: None,
+            consecutive_failures: 0,
+        }
+    }
+}
+
+#[derive(Default)]
+struct StorageHealth {
+    state: Mutex<StorageHealthState>,
+}
+
+impl StorageHealth {
+    fn record_success(&self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.status = "healthy";
+        state.last_successful_flush_at = Some(Utc::now().timestamp());
+        state.last_error_code = None;
+        state.consecutive_failures = 0;
+    }
+
+    fn record_failure(&self, status: &'static str, error_code: &'static str) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.status = status;
+        state.last_error_code = Some(error_code);
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    }
+
+    fn snapshot(&self) -> StorageHealthSnapshot {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        StorageHealthSnapshot {
+            status: state.status,
+            last_successful_flush_at: state.last_successful_flush_at,
+            last_error_code: state.last_error_code,
+            consecutive_failures: state.consecutive_failures,
+            storage_mode: "local-hourly-aggregate-only",
+        }
+    }
+}
+
 /// Coordinates the Raw Input receiver and the private local aggregate store.
 pub struct KeyCollector {
     enabled: AtomicBool,
@@ -57,6 +117,7 @@ pub struct KeyCollector {
     held_keys: Mutex<HashSet<(usize, KeyId)>>,
     writer: Sender<WriterMessage>,
     writer_thread: Mutex<Option<JoinHandle<()>>>,
+    storage_health: Arc<StorageHealth>,
     store: Arc<AggregateStore>,
 }
 
@@ -64,9 +125,11 @@ impl KeyCollector {
     pub fn new(store: Arc<AggregateStore>) -> Arc<Self> {
         let (writer, receiver) = mpsc::channel();
         let writer_store = Arc::clone(&store);
+        let storage_health = Arc::new(StorageHealth::default());
+        let writer_health = Arc::clone(&storage_health);
         let writer_thread = thread::Builder::new()
             .name("keyboard-heatmap-sqlite-writer".to_owned())
-            .spawn(move || writer_loop(writer_store, receiver))
+            .spawn(move || writer_loop(writer_store, receiver, writer_health))
             .expect("Could not start local aggregate writer thread");
 
         Arc::new(Self {
@@ -78,6 +141,7 @@ impl KeyCollector {
             held_keys: Mutex::new(HashSet::new()),
             writer,
             writer_thread: Mutex::new(Some(writer_thread)),
+            storage_health,
             store,
         })
     }
@@ -167,6 +231,8 @@ impl KeyCollector {
             })
             .is_err()
         {
+            self.storage_health
+                .record_failure("unavailable", "writer_unavailable");
             return;
         }
 
@@ -186,6 +252,8 @@ impl KeyCollector {
             }))
             .is_err()
         {
+            self.storage_health
+                .record_failure("unavailable", "writer_unavailable");
             return;
         }
 
@@ -195,18 +263,50 @@ impl KeyCollector {
 
     pub fn flush(&self) -> Result<()> {
         let (reply, receive) = mpsc::channel();
-        self.writer
-            .send(WriterMessage::Flush(reply))
-            .map_err(|_| anyhow!("Local aggregate writer is unavailable"))?;
-        receive
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| anyhow!("Timed out waiting for local aggregate writer"))?
-            .map_err(|message| anyhow!(message))
+        self.writer.send(WriterMessage::Flush(reply)).map_err(|_| {
+            self.storage_health
+                .record_failure("unavailable", "writer_unavailable");
+            anyhow!("Local aggregate writer is unavailable")
+        })?;
+        match receive.recv_timeout(Duration::from_secs(2)) {
+            Ok(result) => result.map_err(|message| anyhow!(message)),
+            Err(_) => {
+                self.storage_health
+                    .record_failure("degraded", "writer_timeout");
+                Err(anyhow!("Timed out waiting for local aggregate writer"))
+            }
+        }
     }
 
     pub fn dashboard(&self, range: DashboardRange) -> Result<DashboardSnapshot> {
-        self.flush()?;
+        // A failed write must be visible through `storage_health`, but an
+        // otherwise readable historical dashboard is still useful.
+        let _ = self.flush();
         self.store.dashboard(range)
+    }
+
+    pub fn storage_health(&self) -> StorageHealthSnapshot {
+        self.storage_health.snapshot()
+    }
+
+    pub fn dashboard_selection(&self, selection: &DateSelection) -> Result<DashboardSnapshot> {
+        let _ = self.flush();
+        self.store.dashboard_selection(selection)
+    }
+
+    pub fn history(
+        &self,
+        selection: &DateSelection,
+        target: Option<&HistoryTarget>,
+        page: u32,
+    ) -> Result<HistoryPage> {
+        let _ = self.flush();
+        self.store.history(selection, target, page)
+    }
+
+    pub fn day_detail(&self, date: &str, target: Option<&HistoryTarget>) -> Result<DayDetail> {
+        let _ = self.flush();
+        self.store.day_detail(date, target)
     }
 
     pub fn live_counts(&self) -> LiveCountsSnapshot {
@@ -249,19 +349,31 @@ impl KeyCollector {
 
         let (reply, receive) = mpsc::channel();
         let _ = self.writer.send(WriterMessage::Shutdown(reply));
-        let _ = receive.recv_timeout(Duration::from_secs(2));
-        if let Some(thread) = self
+        let acknowledged = receive.recv_timeout(Duration::from_secs(2)).is_ok();
+        let thread = self
             .writer_thread
             .lock()
             .expect("Writer thread lock poisoned")
-            .take()
-        {
-            let _ = thread.join();
+            .take();
+        if acknowledged {
+            if let Some(thread) = thread {
+                let _ = thread.join();
+            }
+        } else {
+            self.storage_health
+                .record_failure("unavailable", "writer_shutdown_timeout");
+            // Dropping a JoinHandle detaches it, allowing the process to exit
+            // instead of blocking forever after the bounded acknowledgement.
+            drop(thread);
         }
     }
 }
 
-fn writer_loop(store: Arc<AggregateStore>, receiver: Receiver<WriterMessage>) {
+fn writer_loop(
+    store: Arc<AggregateStore>,
+    receiver: Receiver<WriterMessage>,
+    health: Arc<StorageHealth>,
+) {
     let mut pending_keys = HourlyKeyBatch::new();
     let mut pending_shortcuts = HourlyShortcutBatch::new();
     loop {
@@ -272,7 +384,12 @@ fn writer_loop(store: Arc<AggregateStore>, receiver: Receiver<WriterMessage>) {
                     .or_default() += 1;
                 // Preserve bounded memory even during uninterrupted typing.
                 if pending_keys.len() + pending_shortcuts.len() >= 64 {
-                    let _ = flush_pending(&store, &mut pending_keys, &mut pending_shortcuts);
+                    let _ = flush_pending_and_record(
+                        &store,
+                        &mut pending_keys,
+                        &mut pending_shortcuts,
+                        &health,
+                    );
                 }
             }
             Ok(WriterMessage::Shortcut {
@@ -284,26 +401,72 @@ fn writer_loop(store: Arc<AggregateStore>, receiver: Receiver<WriterMessage>) {
                     .or_default() += 1;
                 // Preserve bounded memory even during uninterrupted typing.
                 if pending_keys.len() + pending_shortcuts.len() >= 64 {
-                    let _ = flush_pending(&store, &mut pending_keys, &mut pending_shortcuts);
+                    let _ = flush_pending_and_record(
+                        &store,
+                        &mut pending_keys,
+                        &mut pending_shortcuts,
+                        &health,
+                    );
                 }
             }
             Ok(WriterMessage::Flush(reply)) => {
-                let result = flush_pending(&store, &mut pending_keys, &mut pending_shortcuts)
-                    .map_err(|error| error.to_string());
+                let result = flush_pending_and_record(
+                    &store,
+                    &mut pending_keys,
+                    &mut pending_shortcuts,
+                    &health,
+                )
+                .map_err(|error| error.to_string());
                 let _ = reply.send(result);
             }
             Ok(WriterMessage::Shutdown(reply)) => {
-                let _ = flush_pending(&store, &mut pending_keys, &mut pending_shortcuts);
+                let _ = flush_pending_and_record(
+                    &store,
+                    &mut pending_keys,
+                    &mut pending_shortcuts,
+                    &health,
+                );
                 let _ = reply.send(());
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = flush_pending(&store, &mut pending_keys, &mut pending_shortcuts);
+                let _ = flush_pending_and_record(
+                    &store,
+                    &mut pending_keys,
+                    &mut pending_shortcuts,
+                    &health,
+                );
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = flush_pending(&store, &mut pending_keys, &mut pending_shortcuts);
+                let _ = flush_pending_and_record(
+                    &store,
+                    &mut pending_keys,
+                    &mut pending_shortcuts,
+                    &health,
+                );
                 break;
             }
+        }
+    }
+}
+
+fn flush_pending_and_record(
+    store: &AggregateStore,
+    pending_keys: &mut HourlyKeyBatch,
+    pending_shortcuts: &mut HourlyShortcutBatch,
+    health: &StorageHealth,
+) -> Result<()> {
+    let had_pending = !pending_keys.is_empty() || !pending_shortcuts.is_empty();
+    match flush_pending(store, pending_keys, pending_shortcuts) {
+        Ok(()) => {
+            if had_pending {
+                health.record_success();
+            }
+            Ok(())
+        }
+        Err(error) => {
+            health.record_failure("degraded", "sqlite_write_failed");
+            Err(error)
         }
     }
 }
@@ -548,6 +711,25 @@ mod tests {
         collector.flush().unwrap();
 
         assert_eq!(collector.live_counts().session_total_presses, 2);
+        collector.shutdown();
+    }
+
+    #[test]
+    fn successful_flush_updates_storage_health_without_exposing_input() {
+        let store = Arc::new(AggregateStore::open_in_memory().unwrap());
+        let collector = KeyCollector::new(store);
+
+        assert_eq!(collector.storage_health().status, "healthy");
+        assert_eq!(collector.storage_health().last_successful_flush_at, None);
+
+        collector.handle_raw_make_at(KeyId::KeyA, 1, 3_600);
+        collector.flush().unwrap();
+
+        let health = collector.storage_health();
+        assert_eq!(health.status, "healthy");
+        assert!(health.last_successful_flush_at.is_some());
+        assert_eq!(health.last_error_code, None);
+        assert_eq!(health.consecutive_failures, 0);
         collector.shutdown();
     }
 }

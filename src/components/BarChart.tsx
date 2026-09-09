@@ -1,12 +1,11 @@
 import { useMemo } from 'react'
 import type { KeyCount } from '../lib/contracts'
+import { formatNumber } from '../lib/format'
 import { getKeyLabel } from '../lib/keyboard-layout'
 
 type BarChartProps = {
   entries: readonly KeyCount[]
 }
-
-const numberFormatter = new Intl.NumberFormat('zh-CN')
 
 export function BarChart({ entries }: BarChartProps) {
   const maxCount = useMemo(
@@ -33,10 +32,10 @@ export function BarChart({ entries }: BarChartProps) {
             <li className="rank-list__item" key={entry.keyId}>
               <span className="rank-list__position">{String(index + 1).padStart(2, '0')}</span>
               <span className="rank-list__label">{label}</span>
-              <span className="rank-list__track" aria-label={`${label} ${numberFormatter.format(entry.pressCount)} 次`}>
+              <span className="rank-list__track" aria-label={`${label} ${formatNumber(entry.pressCount)} 次`}>
                 <span className="rank-list__bar" style={{ width: `${percentage}%` }} />
               </span>
-              <span className="rank-list__count">{numberFormatter.format(entry.pressCount)}</span>
+              <span className="rank-list__count">{formatNumber(entry.pressCount)}</span>
             </li>
           )
         })}
