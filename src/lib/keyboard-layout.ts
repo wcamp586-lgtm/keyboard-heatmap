@@ -183,3 +183,28 @@ export const heatLevel = (count: number, maxCount: number) => {
   if (ratio < 0.62) return 3
   return 4
 }
+
+// Positions that do not exist on an Apple keyboard, plus the Windows menu key.
+// The Rust collector still has a `KeyId` for each of them, so they are hidden
+// in the UI rather than removed from the persisted catalog.
+export const MAC_HIDDEN_KEY_IDS = new Set([13, 14, 15, 30, 97])
+
+// Apple key caps and names for the positions that share a `KeyId` with the
+// Windows layout.
+const MAC_KEY_LABELS: Record<number, string> = {
+  29: 'Delete',
+  33: 'Clear',
+  51: '⌦',
+  91: '⌃',
+  98: '⌃',
+  92: '⌘',
+  96: '⌘',
+  93: '⌥',
+  95: '⌥',
+}
+
+export const keyLabelFor = (keyId: number, isMac: boolean): string =>
+  (isMac ? MAC_KEY_LABELS[keyId] : undefined) ?? getKeyLabel(keyId)
+
+export const visibleKeyCount = (isMac: boolean): number =>
+  isMac ? ALL_KEYS.length - MAC_HIDDEN_KEY_IDS.size : ALL_KEYS.length

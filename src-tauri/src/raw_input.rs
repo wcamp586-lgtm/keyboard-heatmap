@@ -6,10 +6,10 @@
 //! calls text/layout APIs, never blocks input, and never alters other apps'
 //! keyboard handling.
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 use std::sync::Arc;
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 use crate::collector::KeyCollector;
 
 #[cfg(windows)]
@@ -382,10 +382,10 @@ mod windows {
 #[cfg(windows)]
 pub use windows::{start, RawInputController};
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub struct RawInputController;
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 impl RawInputController {
     pub fn is_active(&self) -> bool {
         false
@@ -396,10 +396,399 @@ impl RawInputController {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn start(
     _collector: Arc<KeyCollector>,
     _lifecycle: crate::lifecycle::LifecycleLogger,
 ) -> Result<RawInputController, String> {
     Err("Keyboard Heatmap V1 supports Windows Raw Input only".to_owned())
 }
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::{
+        ffi::c_void,
+        ptr,
+        sync::{
+            atomic::{AtomicBool, AtomicPtr, Ordering},
+            Arc, Mutex,
+        },
+        thread,
+    };
+
+    use core_foundation::base::TCFType;
+    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+    use core_graphics::event::{
+        CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
+        CGEventTapPlacement, CGEventType, EventField,
+    };
+
+    use crate::{
+        collector::KeyCollector,
+        keymap::KeyId,
+        lifecycle::{LifecycleEvent, LifecycleLogger},
+        shortcuts::ShortcutId,
+    };
+
+    /// All physical keyboards share one opaque device slot on macOS; the
+    /// collector only uses it to suppress auto-repeat events.
+    const DEVICE_ID: usize = 0;
+
+    extern "C" {
+        fn CGEventTapEnable(tap: *mut c_void, enable: bool) -> bool;
+        fn CGPreflightListenEventAccess() -> bool;
+        fn CGRequestListenEventAccess() -> bool;
+    }
+
+    static TAP_PORT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+
+    pub struct RawInputController {
+        active: Arc<AtomicBool>,
+        listening: Arc<AtomicBool>,
+    }
+
+    impl RawInputController {
+        pub fn is_active(&self) -> bool {
+            self.active.load(Ordering::Acquire)
+        }
+
+        /// The process-wide event tap stays installed; pausing closes the
+        /// in-memory intake gate so observed events are dropped immediately.
+        pub fn set_listening(&self, enabled: bool) -> Result<(), String> {
+            self.listening.store(enabled, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    pub fn start(
+        collector: Arc<KeyCollector>,
+        lifecycle: LifecycleLogger,
+    ) -> Result<RawInputController, String> {
+        let active = Arc::new(AtomicBool::new(false));
+        let listening = Arc::new(AtomicBool::new(true));
+        let thread_active = Arc::clone(&active);
+        let thread_listening = Arc::clone(&listening);
+        thread::Builder::new()
+            .name("keyboard-heatmap-macos-tap".to_owned())
+            .spawn(move || run_tap(collector, lifecycle, thread_active, thread_listening))
+            .map_err(|error| format!("Could not start the macOS input thread: {error}"))?;
+        Ok(RawInputController { active, listening })
+    }
+
+    struct TapState {
+        collector: Arc<KeyCollector>,
+        listening: Arc<AtomicBool>,
+        modifiers: Mutex<Modifiers>,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct Modifiers {
+        command: bool,
+        control: bool,
+        shift: bool,
+        option: bool,
+    }
+
+    fn run_tap(
+        collector: Arc<KeyCollector>,
+        lifecycle: LifecycleLogger,
+        active: Arc<AtomicBool>,
+        listening: Arc<AtomicBool>,
+    ) {
+        // An ad-hoc signed build loses its Input Monitoring grant whenever the
+        // binary is rebuilt; macOS then keeps accepting the tap but delivers
+        // no events, so the UI would claim "collecting" while nothing arrives.
+        // Ask again on start instead of failing silently.
+        if !input_monitoring_granted() {
+            lifecycle.record(LifecycleEvent::RawInputFailed);
+            open_input_monitoring_settings();
+            return;
+        }
+
+        let state = Arc::new(TapState {
+            collector,
+            listening,
+            modifiers: Mutex::new(Modifiers::default()),
+        });
+        let callback_state = Arc::clone(&state);
+
+        let tap = CGEventTap::new(
+            CGEventTapLocation::HID,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::ListenOnly,
+            vec![
+                CGEventType::KeyDown,
+                CGEventType::KeyUp,
+                CGEventType::FlagsChanged,
+            ],
+            move |_proxy, event_type, event| {
+                if matches!(
+                    event_type,
+                    CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+                ) {
+                    // shortcut: a tap disabled repeatedly is not rebuilt, only
+                    // re-enabled; a persistent failure needs an app restart.
+                    let port = TAP_PORT.load(Ordering::Acquire);
+                    if !port.is_null() {
+                        unsafe { CGEventTapEnable(port, true) };
+                    }
+                } else {
+                    handle_event(&callback_state, event_type, event);
+                }
+                None
+            },
+        );
+
+        let Ok(tap) = tap else {
+            lifecycle.record(LifecycleEvent::RawInputFailed);
+            open_input_monitoring_settings();
+            return;
+        };
+
+        let Ok(source) = tap.mach_port.create_runloop_source(0) else {
+            lifecycle.record(LifecycleEvent::RawInputFailed);
+            return;
+        };
+
+        TAP_PORT.store(
+            tap.mach_port.as_concrete_TypeRef().cast(),
+            Ordering::Release,
+        );
+        let run_loop = CFRunLoop::get_current();
+        unsafe {
+            run_loop.add_source(&source, kCFRunLoopCommonModes);
+        }
+        tap.enable();
+        active.store(true, Ordering::Release);
+        CFRunLoop::run_current();
+    }
+
+    /// Sends the user to the Input Monitoring pane when the tap cannot be
+    /// created because the permission has not been granted yet.
+    fn open_input_monitoring_settings() {
+        let _ = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+            .spawn();
+    }
+
+    /// Returns `true` once Input Monitoring is granted. When it has not been
+    /// asked for yet, the system prompt is shown and its answer is returned.
+    fn input_monitoring_granted() -> bool {
+        unsafe { CGPreflightListenEventAccess() || CGRequestListenEventAccess() }
+    }
+
+    fn handle_event(state: &TapState, event_type: CGEventType, event: &CGEvent) {
+        if !state.listening.load(Ordering::Acquire) {
+            return;
+        }
+        let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+        match event_type {
+            CGEventType::FlagsChanged => handle_flags_changed(state, event, keycode),
+            CGEventType::KeyDown => handle_key_down(state, keycode),
+            CGEventType::KeyUp => {
+                if let Some(key_id) = map_keycode(keycode) {
+                    state.collector.handle_raw_break(key_id, DEVICE_ID);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_flags_changed(state: &TapState, event: &CGEvent, keycode: u16) {
+        let Some(key_id) = map_modifier_keycode(keycode) else {
+            return;
+        };
+        let flags = event.get_flags();
+        let pressed = match key_id {
+            KeyId::MetaLeft | KeyId::MetaRight => flags.contains(CGEventFlags::CGEventFlagCommand),
+            KeyId::ControlLeft | KeyId::ControlRight => {
+                flags.contains(CGEventFlags::CGEventFlagControl)
+            }
+            KeyId::ShiftLeft | KeyId::ShiftRight => flags.contains(CGEventFlags::CGEventFlagShift),
+            KeyId::AltLeft | KeyId::AltRight => flags.contains(CGEventFlags::CGEventFlagAlternate),
+            KeyId::CapsLock => flags.contains(CGEventFlags::CGEventFlagAlphaShift),
+            _ => return,
+        };
+
+        {
+            let mut modifiers = state
+                .modifiers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match key_id {
+                KeyId::MetaLeft | KeyId::MetaRight => modifiers.command = pressed,
+                KeyId::ControlLeft | KeyId::ControlRight => modifiers.control = pressed,
+                KeyId::ShiftLeft | KeyId::ShiftRight => modifiers.shift = pressed,
+                KeyId::AltLeft | KeyId::AltRight => modifiers.option = pressed,
+                _ => {}
+            }
+        }
+
+        if pressed {
+            state.collector.handle_raw_make(key_id, DEVICE_ID);
+        } else {
+            state.collector.handle_raw_break(key_id, DEVICE_ID);
+        }
+    }
+
+    fn handle_key_down(state: &TapState, keycode: u16) {
+        let Some(key_id) = map_keycode(keycode) else {
+            return;
+        };
+        if map_modifier_keycode(keycode).is_some() {
+            // Modifier transitions are recorded once, by `FlagsChanged`.
+            return;
+        }
+        state.collector.handle_raw_make(key_id, DEVICE_ID);
+
+        if !ShortcutId::is_catalog_trigger_key(key_id) {
+            return;
+        }
+        let modifiers = *state
+            .modifiers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut held = Vec::with_capacity(3);
+        // The macOS Command key stands in for Windows' Ctrl here, so ⌘C / ⌘V /
+        // ⌘S still land in the existing fixed catalogue. Ctrl is folded into
+        // the same bit because it is rarely used alone on a Mac.
+        if modifiers.command || modifiers.control {
+            held.push(KeyId::ControlLeft);
+        }
+        if modifiers.shift {
+            held.push(KeyId::ShiftLeft);
+        }
+        if modifiers.option {
+            held.push(KeyId::AltLeft);
+        }
+        if let Some(shortcut_id) = ShortcutId::from_pressed_key_with_held_keys(key_id, held) {
+            state.collector.handle_shortcut_make(shortcut_id);
+        }
+    }
+
+    fn map_modifier_keycode(code: u16) -> Option<KeyId> {
+        Some(match code {
+            0x36 => KeyId::MetaRight,
+            0x37 => KeyId::MetaLeft,
+            0x38 => KeyId::ShiftLeft,
+            0x39 => KeyId::CapsLock,
+            0x3A => KeyId::AltLeft,
+            0x3B => KeyId::ControlLeft,
+            0x3C => KeyId::ShiftRight,
+            0x3D => KeyId::AltRight,
+            0x3E => KeyId::ControlRight,
+            _ => return None,
+        })
+    }
+
+    /// Maps Apple virtual key codes to the fixed ANSI 104 positions. Positions
+    /// that have no key on a Mac keyboard (PrintScreen, ScrollLock, Pause,
+    /// Insert, ContextMenu) stay unmapped and therefore read as zero.
+    fn map_keycode(code: u16) -> Option<KeyId> {
+        Some(match code {
+            0x00 => KeyId::KeyA,
+            0x01 => KeyId::KeyS,
+            0x02 => KeyId::KeyD,
+            0x03 => KeyId::KeyF,
+            0x04 => KeyId::KeyH,
+            0x05 => KeyId::KeyG,
+            0x06 => KeyId::KeyZ,
+            0x07 => KeyId::KeyX,
+            0x08 => KeyId::KeyC,
+            0x09 => KeyId::KeyV,
+            0x0B => KeyId::KeyB,
+            0x0C => KeyId::KeyQ,
+            0x0D => KeyId::KeyW,
+            0x0E => KeyId::KeyE,
+            0x0F => KeyId::KeyR,
+            0x10 => KeyId::KeyY,
+            0x11 => KeyId::KeyT,
+            0x12 => KeyId::Digit1,
+            0x13 => KeyId::Digit2,
+            0x14 => KeyId::Digit3,
+            0x15 => KeyId::Digit4,
+            0x16 => KeyId::Digit6,
+            0x17 => KeyId::Digit5,
+            0x18 => KeyId::Equal,
+            0x19 => KeyId::Digit9,
+            0x1A => KeyId::Digit7,
+            0x1B => KeyId::Minus,
+            0x1C => KeyId::Digit8,
+            0x1D => KeyId::Digit0,
+            0x1E => KeyId::BracketRight,
+            0x1F => KeyId::KeyO,
+            0x20 => KeyId::KeyU,
+            0x21 => KeyId::BracketLeft,
+            0x22 => KeyId::KeyI,
+            0x23 => KeyId::KeyP,
+            0x24 => KeyId::Enter,
+            0x25 => KeyId::KeyL,
+            0x26 => KeyId::KeyJ,
+            0x27 => KeyId::Quote,
+            0x28 => KeyId::KeyK,
+            0x29 => KeyId::Semicolon,
+            0x2A => KeyId::Backslash,
+            0x2B => KeyId::Comma,
+            0x2C => KeyId::Slash,
+            0x2D => KeyId::KeyN,
+            0x2E => KeyId::KeyM,
+            0x2F => KeyId::Period,
+            0x30 => KeyId::Tab,
+            0x31 => KeyId::Space,
+            0x32 => KeyId::Grave,
+            0x33 => KeyId::Backspace,
+            0x35 => KeyId::Escape,
+            0x36 => KeyId::MetaRight,
+            0x37 => KeyId::MetaLeft,
+            0x38 => KeyId::ShiftLeft,
+            0x39 => KeyId::CapsLock,
+            0x3A => KeyId::AltLeft,
+            0x3B => KeyId::ControlLeft,
+            0x3C => KeyId::ShiftRight,
+            0x3D => KeyId::AltRight,
+            0x3E => KeyId::ControlRight,
+            0x41 => KeyId::NumpadDecimal,
+            0x43 => KeyId::NumpadMultiply,
+            0x45 => KeyId::NumpadAdd,
+            0x47 => KeyId::NumLock,
+            0x4B => KeyId::NumpadDivide,
+            0x4C => KeyId::NumpadEnter,
+            0x4E => KeyId::NumpadSubtract,
+            0x52 => KeyId::Numpad0,
+            0x53 => KeyId::Numpad1,
+            0x54 => KeyId::Numpad2,
+            0x55 => KeyId::Numpad3,
+            0x56 => KeyId::Numpad4,
+            0x57 => KeyId::Numpad5,
+            0x58 => KeyId::Numpad6,
+            0x59 => KeyId::Numpad7,
+            0x5B => KeyId::Numpad8,
+            0x5C => KeyId::Numpad9,
+            0x60 => KeyId::F5,
+            0x61 => KeyId::F6,
+            0x62 => KeyId::F7,
+            0x63 => KeyId::F3,
+            0x64 => KeyId::F8,
+            0x65 => KeyId::F9,
+            0x67 => KeyId::F11,
+            0x6D => KeyId::F10,
+            0x6F => KeyId::F12,
+            0x73 => KeyId::Home,
+            0x74 => KeyId::PageUp,
+            0x75 => KeyId::Delete,
+            0x76 => KeyId::F4,
+            0x77 => KeyId::End,
+            0x78 => KeyId::F2,
+            0x79 => KeyId::PageDown,
+            0x7A => KeyId::F1,
+            0x7B => KeyId::ArrowLeft,
+            0x7C => KeyId::ArrowRight,
+            0x7D => KeyId::ArrowDown,
+            0x7E => KeyId::ArrowUp,
+            _ => return None,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use macos::{start, RawInputController};

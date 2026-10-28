@@ -7,10 +7,15 @@ license = "MIT"
 repository = "https://github.com/wcamp586-lgtm/keyboard-heatmap"
 edition = "2021"
 rust-version = "1.77.2"
+default-run = "keyboard-heatmap"
 
 [lib]
 name = "keyboard_heatmap_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "keyboard-heatmap-agent"
+path = "src/bin/keyboard-heatmap-agent.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -33,6 +38,10 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.24"
 
 [dev-dependencies]
 chrono-tz = "0.10"

@@ -1,15 +1,17 @@
-mod app_state;
-mod collector;
-mod commands;
-mod date_range;
-mod keymap;
-mod lifecycle;
-mod models;
-mod raw_input;
-mod shortcut_hook;
-mod shortcuts;
-mod storage;
-mod tray;
+#[cfg(target_os = "macos")]
+pub mod agent_controller;
+pub mod app_state;
+pub mod collector;
+pub mod commands;
+pub mod date_range;
+pub mod keymap;
+pub mod lifecycle;
+pub mod models;
+pub mod raw_input;
+pub mod shortcut_hook;
+pub mod shortcuts;
+pub mod storage;
+pub mod tray;
 
 use tauri::Manager;
 

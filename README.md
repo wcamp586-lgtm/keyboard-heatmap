@@ -1,12 +1,22 @@
 # 键力（Keyboard Heatmap）
 
-一个开源、仅支持 Windows 的本地桌面工具：用 ANSI 104 键物理布局显示按键使用热度。
+一个开源、本机离线的桌面工具：用 ANSI 104 键物理布局显示按键使用热度。支持 Windows 与 macOS。
 
 > 当前版本：v0.1.6。仅在本机聚合统计按键使用习惯，不尝试还原输入内容。
 
 ## 安装
 
-Windows x64 安装包见 [GitHub Releases](https://github.com/wcamp586-lgtm/keyboard-heatmap/releases)。也可按下面步骤从源码构建。V1 仅支持 Windows；安全桌面、锁屏、UAC、受保护软件中的按键不承诺统计。升级前请从系统托盘退出旧版本，安装后检查左上角版本号。
+Windows x64 安装包见 [GitHub Releases](https://github.com/wcamp586-lgtm/keyboard-heatmap/releases)。也可按下面步骤从源码构建。安全桌面、锁屏、UAC、受保护软件中的按键不承诺统计。升级前请从系统托盘退出旧版本，安装后检查左上角版本号。
+
+macOS 构建产物是 `src-tauri/target/release/bundle/dmg` 下的 dmg，或直接把 `macos/键盘热力.app` 拖进「应用程序」。macOS 的键盘监理由独立的常驻 agent 完成，应用本身不需要输入监控权限：
+
+```bash
+./scripts/install-agent.sh
+```
+
+首次运行后在「系统设置 → 隐私与安全性 → 输入监控」里允许 `keyboard-heatmap-agent`。agent 与界面分离，因此之后重新构建、替换「键盘热力.app」都不会让这项授权失效。agent 每 2 秒写一次心跳（`~/Library/Application Support/com.local.keyboardheatmap/agent.heartbeat`），应用据此显示「正在统计 / 采集不可用」。
+
+界面会按平台切换键盘布局：macOS 使用 `⌃` `⌥` `⌘` 与 Apple 键名（如 `Delete`、`Clear`、`⌦`），并隐藏 PrtSc、ScrLk、Pause、Insert、Menu 这五个 Windows 专属位置（热力图 99 键，Windows 为 104 键）。
 
 累计更新见 [CHANGELOG.md](CHANGELOG.md)。v0.1.6 包含 v0.1.3 首次开源之后的本地迭代，未为中间状态补造发布标签。
 
@@ -18,7 +28,7 @@ Windows x64 安装包见 [GitHub Releases](https://github.com/wcamp586-lgtm/keyb
 - 快捷键：内置目录覆盖常用 Ctrl、Alt、Win 及其明确列出的修饰组合，例如 `Win + D`、`Alt + Tab`、`Alt + F4`、`Ctrl + C`。它们只按小时汇总总次数；键盘热力图仍只显示每个实体键的使用量。
 - 不统计：字符内容、任意按键顺序、未列入固定目录的组合、剪贴板、窗口标题、应用名称、设备标识。
 - 不提供：回放、导出、多布局、开机启动、账号、云同步或跨设备同步。
-- 存储：SQLite 仅保存 `hour_start_utc`、固定 `key_id`/`shortcut_id`、`press_count` 的小时聚合数据；不会写入原始按键事件。
+- 存储：SQLite 仅保存 `hour_start_utc`、固定 `key_id`/`shortcut_id`、`press_count` 的小时聚合数据；不会写入原始按键事件。数据库位于 Windows 的 `%APPDATA%\com.local.keyboardheatmap\` 或 macOS 的 `~/Library/Application Support/com.local.keyboardheatmap/`。
 
 ## 日期与刷新规则
 
@@ -28,7 +38,7 @@ Windows x64 安装包见 [GitHub Releases](https://github.com/wcamp586-lgtm/keyb
 
 ## 从源码运行
 
-先安装 Node.js、Rust MSVC 工具链、Visual Studio C++ Build Tools 和 WebView2 Runtime。
+Windows 需要 Node.js、Rust MSVC 工具链、Visual Studio C++ Build Tools 和 WebView2 Runtime；macOS 需要 Node.js、Rust 工具链和 Xcode Command Line Tools。
 
 ```powershell
 git clone https://github.com/wcamp586-lgtm/keyboard-heatmap.git
@@ -56,7 +66,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-首次 Rust 构建需要从 crates.io 下载依赖。Windows 安装包输出到 `src-tauri\target\release\bundle\nsis`。
+macOS 上用 `npm run tauri -- build --bundles app --bundles dmg` 替代 nsis 那一步；首次构建需要从 crates.io 下载依赖。Windows 安装包输出到 `src-tauri\target\release\bundle\nsis`，macOS 产物在 `src-tauri/target/release/bundle/`。
 
 Vite 启动与构建会检查 `package.json`、Tauri 配置与 `Cargo.toml` 的版本一致性。测试覆盖完整排行、共享占比分母、日期验证、分页空白日、单项小时合计、旧库兼容及异步刷新。夏令时测试使用 [Chrono-TZ](https://docs.rs/chrono-tz/latest/chrono_tz/) 的时区数据，仅为开发测试依赖，不增加应用运行时数据采集。
 
@@ -64,7 +74,9 @@ Vite 启动与构建会检查 `package.json`、Tauri 配置与 `Cargo.toml` 的�
 
 Windows Raw Input 只监听键盘的物理扫描位置，立即映射为固定 `KeyId` 并按小时聚合，用于热力图。它不进行字符转换、不拦截输入，也不会影响前台软件的正常键盘输入。
 
-快捷键是另一条严格受限的观察通道：Windows 低级键盘回调只识别内置目录中的固定组合（包括 `Win + D`、`Alt + Tab`），命中后只向本进程的消息窗口投递一个数字 `shortcut_id`。回调立即把事件交还给 Windows，不抢占、不修改系统快捷键；它不把虚拟键码、扫描码、修饰键状态、按键顺序或文字交给 SQLite。数据库仍只保存时间桶、固定 ID 和次数。系统安全桌面、锁屏、UAC 或受保护软件中的按键不承诺可统计。
+macOS 使用 CoreGraphics 的 HID 事件 tap（`ListenOnly`，只观察不改写事件）：读取物理键码后立即映射为固定 `KeyId`，修饰键状态只用于匹配固定快捷键目录，匹配完即丢弃。它需要「输入监控」权限，不读取文本、不记录按键顺序。
+
+快捷键是另一条严格受限的观察通道：Windows 低级键盘回调只识别内置目录中的固定组合（包括 `Win + D`、`Alt + Tab`），命中后只向本进程的消息窗口投递一个数字 `shortcut_id`。回调立即把事件交还给 Windows，不抢占、不修改系统快捷键；它不把虚拟键码、扫描码、修饰键状态、按键顺序或文字交给 SQLite。macOS 上由同一个 HID tap 完成匹配，并把 `⌘` 当作 `Ctrl` 使用，因此 `⌘C`、`⌘V`、`⌘S` 会落入 `ctrl_c`、`ctrl_v`、`ctrl_s`。数据库仍只保存时间桶、固定 ID 和次数。系统安全桌面、锁屏、UAC 或受保护软件中的按键不承诺可统计。
 
 暂停时，程序会先关闭内存计数门，再停止固定快捷键观察和 Raw Input 注册；恢复时两类监听都重新成功注册后才继续计数。关闭主窗口会隐藏到通知区域；左键或双击托盘图标可重新显示窗口，只有托盘菜单中的“退出”会退出程序。重复启动应用时，第二次启动只会唤醒已有窗口，不会创建第二套采集器。
 

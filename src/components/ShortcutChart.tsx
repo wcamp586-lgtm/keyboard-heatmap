@@ -1,7 +1,8 @@
 import { useMemo } from 'react'
 import type { ShortcutCount } from '../lib/contracts'
 import { formatNumber } from '../lib/format'
-import { getShortcutDefinition } from '../lib/shortcuts'
+import { IS_MAC } from '../lib/platform'
+import { getShortcutDefinition, shortcutKeysFor } from '../lib/shortcuts'
 
 type ShortcutChartProps = {
   entries: readonly ShortcutCount[]
@@ -14,7 +15,7 @@ export function ShortcutChart({ entries, totalShortcuts }: ShortcutChartProps) {
       .sort((left, right) => right.pressCount - left.pressCount)
       .flatMap((entry) => {
         const shortcut = getShortcutDefinition(entry.shortcutId)
-        return shortcut ? [{ ...entry, ...shortcut }] : []
+        return shortcut ? [{ ...entry, ...shortcut, keys: shortcutKeysFor(shortcut.keys, IS_MAC) }] : []
       }),
     [entries],
   )

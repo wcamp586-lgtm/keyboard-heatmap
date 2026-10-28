@@ -1,6 +1,16 @@
 import type { DashboardSnapshot } from '../../lib/contracts'
-import { ALL_KEYS, ARROW_KEYS, FUNCTION_GROUPS, getKeyLabel, KEY_WIRE_IDS, NAVIGATION_KEYS, NUMPAD_KEYS } from '../../lib/keyboard-layout'
-import { RECOGNIZED_SHORTCUTS } from '../../lib/shortcuts'
+import {
+  ALL_KEYS,
+  ARROW_KEYS,
+  FUNCTION_GROUPS,
+  keyLabelFor,
+  KEY_WIRE_IDS,
+  MAC_HIDDEN_KEY_IDS,
+  NAVIGATION_KEYS,
+  NUMPAD_KEYS,
+} from '../../lib/keyboard-layout'
+import { IS_MAC } from '../../lib/platform'
+import { RECOGNIZED_SHORTCUTS, shortcutKeysFor } from '../../lib/shortcuts'
 
 export const ZONES = ['主键区', '功能区', '编辑导航区', '方向区', '数字小键盘'] as const
 export type RankingKind = 'key' | 'shortcut'
@@ -20,17 +30,27 @@ const detailedLabels: Record<number, string> = {
   92: '左 Win', 96: '右 Win', 93: '左 Alt', 95: '右 Alt', 94: 'Space 空格', 70: 'Enter 主回车',
   99: '← 左方向', 100: '↓ 下方向', 101: '→ 右方向', 86: '↑ 上方向',
 }
-export const getDetailedKeyLabel = (id: number) => detailedLabels[id]
-  ?? (zones.get(id) === '数字小键盘' ? `小键盘 ${getKeyLabel(id)}` : getKeyLabel(id))
+const macDetailedLabels: Record<number, string> = {
+  74: '左 ⇧', 85: '右 ⇧', 91: '左 ⌃', 98: '右 ⌃',
+  92: '左 ⌘', 96: '右 ⌘', 93: '左 ⌥', 95: '右 ⌥', 94: 'Space 空格', 70: 'Enter 主回车',
+  99: '← 左方向', 100: '↓ 下方向', 101: '→ 右方向', 86: '↑ 上方向',
+}
+export const getDetailedKeyLabel = (id: number) => {
+  const labels = IS_MAC ? macDetailedLabels : detailedLabels
+  const label = labels[id] ?? keyLabelFor(id, IS_MAC)
+  return zones.get(id) === '数字小键盘' && !labels[id] ? `小键盘 ${label}` : label
+}
 
 export function rankingRows(snapshot: DashboardSnapshot, kind: RankingKind): RankingRow[] {
   const total = kind === 'key' ? snapshot.totalPresses : snapshot.totalShortcuts
   const keyCounts = new Map(snapshot.heatmap.map(({ keyId, pressCount }) => [keyId, pressCount]))
   const shortcutCounts = new Map(snapshot.shortcutCounts.map(({ shortcutId, pressCount }) => [shortcutId, pressCount]))
-  const rows = kind === 'key' ? ALL_KEYS.map(({ id }) => ({
-    id: KEY_WIRE_IDS[id], order: id, label: getDetailedKeyLabel(id), detail: zones.get(id) ?? '主键区', count: keyCounts.get(id) ?? 0,
-  })) : RECOGNIZED_SHORTCUTS.map(({ id, keys, label }, order) => ({
-    id, order, label: keys, detail: label, count: shortcutCounts.get(id) ?? 0,
+  const rows = kind === 'key' ? ALL_KEYS
+    .filter(({ id }) => !(IS_MAC && MAC_HIDDEN_KEY_IDS.has(id)))
+    .map(({ id }) => ({
+      id: KEY_WIRE_IDS[id], order: id, label: getDetailedKeyLabel(id), detail: zones.get(id) ?? '主键区', count: keyCounts.get(id) ?? 0,
+    })) : RECOGNIZED_SHORTCUTS.map(({ id, keys, label }, order) => ({
+    id, order, label: shortcutKeysFor(keys, IS_MAC), detail: label, count: shortcutCounts.get(id) ?? 0,
   }))
   return rows.sort((a, b) => b.count - a.count || a.order - b.order)
     .map((row, index) => ({ ...row, rank: index + 1, share: total > 0 ? row.count / total * 100 : 0 }))

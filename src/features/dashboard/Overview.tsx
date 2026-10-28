@@ -6,6 +6,8 @@ import { MetricCard } from '../../components/MetricCard'
 import { ShortcutChart } from '../../components/ShortcutChart'
 import { RANGE_OPTIONS, type AppSnapshot } from '../../lib/contracts'
 import { formatNumber } from '../../lib/format'
+import { visibleKeyCount } from '../../lib/keyboard-layout'
+import { IS_MAC } from '../../lib/platform'
 import { getDetailedKeyLabel } from '../ranking/ranking'
 
 export function Overview({ appSnapshot, selectedKeyId, setSelectedKeyId, busy, toggleCollection, browserDemo, isStale, onRanking }: {
@@ -27,7 +29,7 @@ export function Overview({ appSnapshot, selectedKeyId, setSelectedKeyId, busy, t
           <div className="panel__heading">
             <div>
               <p className="eyebrow">{`${snapshot.rangeStartDate} — ${snapshot.rangeEndDate} · 本机聚合`}</p>
-              <h2 id="heatmap-title">104 键实时热力图</h2>
+              <h2 id="heatmap-title">{IS_MAC ? 'Mac 键盘实时热力图' : '104 键实时热力图'}</h2>
             </div>
             <span className={`collection-state${collectionHealth === 'paused' ? ' collection-state--paused' : ''}${collectionHealth === 'degraded' || collectionHealth === 'unavailable' ? ' collection-state--unavailable' : ''}`}>
               <i aria-hidden="true" />
@@ -82,7 +84,7 @@ export function Overview({ appSnapshot, selectedKeyId, setSelectedKeyId, busy, t
           <MetricCard
             icon={<ChartBar size={18} weight="bold" />}
             label="已使用按键"
-            value={`${snapshot.activeKeyCount} / 104`}
+            value={`${snapshot.activeKeyCount} / ${visibleKeyCount(IS_MAC)}`}
             helper="至少按过一次的物理键"
           />
           <MetricCard

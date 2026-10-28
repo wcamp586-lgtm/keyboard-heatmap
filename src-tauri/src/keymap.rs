@@ -3,6 +3,10 @@
 //! These identifiers deliberately describe fixed hardware positions. They are
 //! not characters, text, or a reconstruction of what a person typed.
 
+// Windows scan-code mapping is unused on macOS, which maps Apple virtual key
+// codes instead.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
 use std::fmt;
 
 /// A fixed key position on a 104-key ANSI keyboard.

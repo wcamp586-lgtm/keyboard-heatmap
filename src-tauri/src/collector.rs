@@ -6,6 +6,9 @@
 //! bucket plus one fixed ID at a time; it never sees a raw event, a character,
 //! a key sequence, or a device.
 
+// `forget_device` is only called by the Windows Raw Input receiver.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
 use std::{
     collections::{BTreeMap, HashSet},
     sync::{

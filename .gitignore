@@ -33,3 +33,6 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# 本地代码签名证书（私钥，不提交）
+.signing/

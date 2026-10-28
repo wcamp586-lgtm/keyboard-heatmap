@@ -113,3 +113,16 @@ export const getShortcutLabel = (shortcutId: string): string | undefined => {
   const shortcut = getShortcutDefinition(shortcutId)
   return shortcut ? `${shortcut.keys} · ${shortcut.label}` : undefined
 }
+
+const MAC_SHORTCUT_SYMBOLS: readonly [RegExp, string][] = [
+  [/\bCtrl\b/g, '⌘'],
+  [/\bWin\b/g, '⌘'],
+  [/\bAlt\b/g, '⌥'],
+  [/\bShift\b/g, '⇧'],
+]
+
+/** macOS 把 ⌘ 当作 Ctrl 统计，展示时换成 Apple 键帽符号。 */
+export const shortcutKeysFor = (keys: string, isMac: boolean): string =>
+  isMac
+    ? MAC_SHORTCUT_SYMBOLS.reduce((text, [pattern, symbol]) => text.replace(pattern, symbol), keys)
+    : keys

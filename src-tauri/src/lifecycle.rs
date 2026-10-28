@@ -4,6 +4,9 @@
 //! never receives keyboard data, device handles, focused-window information,
 //! application names, or error strings that could carry unrelated context.
 
+// Windows-only transition variants are simply not emitted on macOS.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -77,6 +80,17 @@ impl LifecycleLogger {
                 fs::create_dir_all(&directory).ok()?;
                 open_rotating_log(&directory).ok()
             })
+            .map(|file| Arc::new(Mutex::new(file)));
+
+        Self { file }
+    }
+
+    /// Opens the diagnostics log at an explicit directory. Used by the
+    /// standalone collection agent, which has no Tauri `AppHandle`.
+    pub fn open_at(directory: &Path) -> Self {
+        let file = fs::create_dir_all(directory)
+            .ok()
+            .and_then(|()| open_rotating_log(directory).ok())
             .map(|file| Arc::new(Mutex::new(file)));
 
         Self { file }

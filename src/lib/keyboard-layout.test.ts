@@ -5,6 +5,9 @@ import {
   heatLevel,
   KEY_BY_ID,
   KEY_WIRE_IDS,
+  keyLabelFor,
+  MAC_HIDDEN_KEY_IDS,
+  visibleKeyCount,
 } from './keyboard-layout'
 
 describe('fixed ANSI 104-key layout', () => {
@@ -35,5 +38,24 @@ describe('fixed ANSI 104-key layout', () => {
     expect(heatLevel(120, 900)).toBe(2)
     expect(heatLevel(400, 900)).toBe(3)
     expect(heatLevel(900, 900)).toBe(4)
+  })
+})
+
+describe('macOS layout adaptation', () => {
+  it('hides the five Windows-only positions and counts the rest', () => {
+    expect([...MAC_HIDDEN_KEY_IDS].sort((left, right) => left - right)).toEqual([13, 14, 15, 30, 97])
+    expect(visibleKeyCount(true)).toBe(99)
+    expect(visibleKeyCount(false)).toBe(104)
+  })
+
+  it('uses Apple key-cap labels for modifiers and editing keys', () => {
+    expect(keyLabelFor(91, true)).toBe('⌃')
+    expect(keyLabelFor(92, true)).toBe('⌘')
+    expect(keyLabelFor(93, true)).toBe('⌥')
+    expect(keyLabelFor(29, true)).toBe('Delete')
+    expect(keyLabelFor(33, true)).toBe('Clear')
+    expect(keyLabelFor(51, true)).toBe('⌦')
+    expect(keyLabelFor(91, false)).toBe('Ctrl')
+    expect(keyLabelFor(29, false)).toBe('Backspace')
   })
 })

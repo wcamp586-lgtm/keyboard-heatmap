@@ -494,6 +494,11 @@
   margin-bottom: 19px;
 }
 
+/* Apple keyboards have no PrtSc / ScrLk / Pause group. */
+.function-row--mac {
+  grid-template-columns: 1fr 4fr 4fr 4fr;
+}
+
 .function-group {
   display: flex;
   gap: 6px;
@@ -528,6 +533,12 @@
   grid-template-rows: repeat(2, minmax(0, 1fr));
   align-self: start;
   gap: 6px;
+}
+
+/* Without the Insert key the remaining five positions read better as 2 × 3. */
+.navigation-pad--mac {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, minmax(0, 1fr));
 }
 
 .arrow-pad {

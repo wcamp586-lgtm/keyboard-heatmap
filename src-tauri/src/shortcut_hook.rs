@@ -8,6 +8,10 @@
 //! writes SQLite, logs, inspects text, or returns a value that could alter the
 //! user's keyboard input.
 
+// The Windows hook matcher is untested code on macOS, where the HID tap owns
+// shortcut recognition instead.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
 use crate::{keymap::KeyId, shortcuts::ShortcutId};
 
 const WM_KEYDOWN_MESSAGE: u32 = 0x0100;
@@ -874,10 +878,10 @@ mod windows {
 #[cfg(windows)]
 pub use windows::{start, ShortcutHookController};
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub struct ShortcutHookController;
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 impl ShortcutHookController {
     pub fn is_active(&self) -> bool {
         false
@@ -890,12 +894,39 @@ impl ShortcutHookController {
     pub fn shutdown(&self) {}
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn start(
     _collector: std::sync::Arc<crate::collector::KeyCollector>,
     _lifecycle: crate::lifecycle::LifecycleLogger,
 ) -> Result<ShortcutHookController, String> {
     Err("Keyboard Heatmap V1 supports Windows keyboard shortcuts only".to_owned())
+}
+
+/// macOS has no separate listener: the HID event tap owned by `raw_input` also
+/// matches the fixed shortcut catalogue, so this control only reports the
+/// combined listener as active.
+#[cfg(target_os = "macos")]
+pub struct ShortcutHookController;
+
+#[cfg(target_os = "macos")]
+impl ShortcutHookController {
+    pub fn is_active(&self) -> bool {
+        true
+    }
+
+    pub fn set_listening(&self, _enabled: bool) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn shutdown(&self) {}
+}
+
+#[cfg(target_os = "macos")]
+pub fn start(
+    _collector: std::sync::Arc<crate::collector::KeyCollector>,
+    _lifecycle: crate::lifecycle::LifecycleLogger,
+) -> Result<ShortcutHookController, String> {
+    Ok(ShortcutHookController)
 }
 
 #[cfg(test)]
